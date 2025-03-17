@@ -1,0 +1,164 @@
+---
+title: "Predicting Behavioral Responses in Mouse Based on Neural Activity"
+author: "Xin Peng 922470310"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+##Abstract
+The project will analyze a set of data collected by Steinmetz et al. (2019). This experiments were performed on a total of 10 mice over 39 sessions. I use the following 18 sessions, analyze and integrate them, then create a model to test it with a dataset that can test the success or failure of the mice.
+
+##Introduction
+This project focuses on predicting mice's behavioral responses based on their neural spike data and visual stimuli. My goal is to build a model to determine whether a mouse will succeed or fail in a next trial.  
+
+##Data set
+```{r}
+# 加载数据
+data_path <- "./Data/"
+sessions=list()
+for(i in 1:18){
+  sessions[[i]]=readRDS(paste('./Data/session',i,'.rds',sep=''))
+  #print(sessions[[i]]$mouse_name)
+  #print(sessions[[i]]$date_exp)
+  }
+```
+
+##Exploratory analysis
+The goal of this part is to conduct an exploratory analysis of the data set to get the basic structure
+
+###Distribution of trial counts acros sessions
+The figure below shows the distribution of trial counts across the 18 sessions. Session 9 and 14 have the highest number of trials, Session 1 has the fewest.
+```{r}
+num_trials <- sapply(sessions, function(s) length(s$spks))
+print(num_trials) 
+barplot(num_trials, names.arg=1:18, main="test number for each SESSION", xlab="SESSION", ylab="test number")
+```
+
+###Distribution of Feedback Types
+Next, I analyze the proportion of successful trials (1) and failed trials (-1) in the experiment.
+The dataset exhibits class imbalance, where the number of successful trials (1) is significantly higher than that of failed trials (-1).
+```{r}
+feedback_all <- unlist(lapply(sessions, function(s) s$feedback_type))
+table(feedback_all)
+
+barplot(table(feedback_all), main="Feedback Type Distribution", xlab="Deedback Type(1=success, -1=failure)", ylab="Number of Test")
+```
+###Distribution of spike
+The distribution of spike counts is skewed, with most trials having a moderate number of spikes. Histogram shows multiple peaks, suggesting the presence of different categories of neural responses in the data.
+ 
+```{r}
+spike_counts <- unlist(lapply(sessions, function(s) sapply(s$spks, function(x) sum(x))))
+
+hist(spike_counts, breaks=50, main="Number Distribution of Nerve Impulses", xlab="Total Number", ylab="Frequency")
+```
+
+###Behavioral consistency across sessions
+I analyzed the success rates of different sessions to evaluate the consistency of the experiment.
+The success rates across sessions were relatively stable, between 0.6 and 0.8.
+
+```{r}
+success_rate <- sapply(sessions, function(s) mean(s$feedback_type == 1))
+
+barplot(success_rate, names.arg=1:18, main="Success Rate of Each Session",xlab="Session Numbe", ylab="Success Rate")
+```
+###Analysis of Visual Stimulus
+There is no clear linear relationship between feedback type (success/failure) and contrast.
+```{r}
+library(ggplot2)
+contrast_data <- do.call(rbind, lapply(sessions, function(s) data.frame(
+  left = s$contrast_left, 
+  right = s$contrast_right, 
+  feedback = s$feedback_type
+)))
+
+ggplot(contrast_data, aes(x=left, y=right, color=factor(feedback))) +
+  geom_jitter(alpha=0.5) +
+  labs(title="Left-right Contrast Distribution", x="Left", y="Right", color="Feedback Type")
+```
+
+
+###summary
+Severe Imbalance in Feedback Type
+The dataset exhibits a significant class imbalance, with far more successful (1) trials than failed (-1) trials. This imbalance may cause the predictive model to favor the "success" category while overlooking failures
+Neural Spike Data Exhibits a Multi-Peak Distribution
+The presence of multiple peaks suggests that different trials involve distinct neural activity patterns.Dimensionality reduction can help minimize noise and improve model efficiency.
+ 
+##Data Integration
+Based on the results of Exploratory Data Analysis, I implemented the following data preprocessing steps to improve model
+
+###Handling Class Imbalance in Feedback Type 
+In the EDA, we found that successful trials (1) were far more frequent than failed trials (-1). I use undersampling, randomly removing a portion of successful (1) trials to make their count closer to that of failed (-1) trials.
+
+```{r}
+balance_data <- function(session) {
+    df <- data.frame(
+        contrast_left = session$contrast_left,
+        contrast_right = session$contrast_right,
+        feedback = as.numeric(session$feedback_type)
+    )
+
+    success_count <- sum(df$feedback == 1, na.rm = TRUE)
+    failure_count <- sum(df$feedback == -1, na.rm = TRUE)
+
+    # 如果 `failure_count == 0`，就不做 undersampling，直接返回原始数据
+    if (failure_count == 0 | success_count == 0) {
+        warning("Warning: One class is missing. Returning original dataset.")
+        return(df)
+    }
+
+    df$feedback <- as.numeric(df$feedback)
+
+    if (success_count > failure_count) {
+        df_success <- df %>% filter(feedback == 1) %>% sample_n(failure_count)
+        df_failure <- df %>% filter(feedback == -1)
+    } else {
+        df_failure <- df %>% filter(feedback == -1) %>% sample_n(success_count)
+        df_success <- df %>% filter(feedback == 1)
+    }
+
+    balanced_df <- rbind(df_success, df_failure)
+    return(balanced_df)
+}
+```
+
+###Dimensionality Reduction of Neural Spike Data
+In the EDA, we found that the neural spike data has high dimensionality and a multi-peak distribution, which could lead to model overfitting if used directly.
+To address this, we applied PCA to reduce computational complexity.
+I ramdomly choose 10000 lines data, because the data is too large, vector memory limit of 16.0 Gb reached
+
+```{r}
+spike_data <- do.call(rbind, lapply(sessions, function(s) s$spks))
+spike_data <- do.call(rbind, spike_data)
+dim(spike_data)
+
+set.seed(123)
+sample_index <- sample(seq_len(nrow(spike_data)), size = 10000, replace = FALSE)
+spike_data_sampled <- spike_data[sample_index, ]
+dim(spike_data_sampled)
+
+pca_result <- prcomp(spike_data_sampled, scale. = TRUE)
+
+```
+
+##Predictive Modeling
+In this part,our goal is to split the dataset into training and testing sets and select an appropriate machine learning model for prediction.
+###Choose a Model
+In this part I will compare models, and choose one as the final model to test the test data set.
+I compare Logistic Regression and Random Forest.
+Logistic regression performs well. random forest may have higher requirements on training data, especially in the case of uneven data, it is prone to overfitting or underfitting problems. In our data, the gap between (1) and (-1) is too large, so random forest is not a good choice, so I choose logistic regression.
+
+##Prediction performance on the test sets
+
+##Discussion
+In this experiment, I compared Logistic Regression and Random Forest, and finally chose logistic regression as the final model. Logistic regression achieved 72.5% accuracy on the test set. Although logistic regression is a linear model and may not capture highly non-linear relationships, it shows good predictive performance on current data sets.
+
+## 
+https://www.geeksforgeeks.org/how-to-calculate-f1-score-in-r/
+https://stackoverflow.com/questions/67993693/how-to-calculate-model-accuracy-in-rstudio-for-logistic-regression
+https://book.stat420.org/model-building.html
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
